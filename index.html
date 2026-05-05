@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>真实钢琴 MIDI 播放器 · Falling Notes</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(ellipse at top, #1a1a2e 0%, #07070d 100%);
+    font-family: -apple-system, "Helvetica Neue", sans-serif;
+    color: #eee;
+    display: flex; flex-direction: column;
+  }
+  .topbar {
+    display: flex; gap: 14px; align-items: center;
+    padding: 12px 20px;
+    background: rgba(255,255,255,0.04);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+    flex-wrap: wrap;
+  }
+  .topbar h1 { font-weight: 300; letter-spacing: 3px; font-size: 16px; color:#f0e6d2; margin-right: 12px; }
+  .btn {
+    background: linear-gradient(180deg,#5a4d3a,#3a2f24);
+    color:#f0e6d2; padding:7px 14px; border:none; border-radius:6px;
+    cursor:pointer; font-size:13px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.15), 0 2px 4px rgba(0,0,0,0.4);
+  }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  #status { font-size: 12px; color: #ffcc88; margin-left: auto; }
+
+  /* 主区：下落区 + 键盘 */
+  .stage {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+  #fallCanvas {
+    position: absolute; left:0; top:0; width:100%; height:100%;
+    display: block;
+  }
+  /* 键盘锚定底部 */
+  .piano-wrap {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    display: flex; flex-direction: column; align-items: center;
+    pointer-events: none;
+  }
+  .piano-top {
+    width: 100%;
+    height: 14px;
+    background: linear-gradient(180deg, #1a0f08 0%, #2b1810 60%, #0a0604 100%);
+    box-shadow: inset 0 2px 4px rgba(255,200,150,0.15);
+  }
+  .felt { width:100%; height: 6px; background: linear-gradient(180deg, #6b1a1a, #3a0808); box-shadow: inset 0 2px 4px rgba(0,0,0,0.6); }
+  .piano-scroll {
+    width: 100%;
+    overflow-x: auto;
+    background: #0a0604;
+    pointer-events: auto;
+  }
+  .piano {
+    position: relative; display: flex; background: #0a0604;
+    padding: 0 4px 8px;
+    box-shadow: 0 -12px 30px rgba(0,0,0,0.7), inset 0 -3px 6px rgba(0,0,0,0.5);
+    width: max-content;
+    margin: 0 auto;
+  }
+  .key { position: relative; cursor: pointer; user-select: none;
+    transition: transform 0.04s ease-out, background 0.08s;
+    transform-origin: top center; }
+  .key.white {
+    width: 30px; height: 170px;
+    background: linear-gradient(180deg, #fffef8 0%, #f5f0e0 88%, #d8d0bc 100%);
+    border: 1px solid #aaa; border-top: none; border-radius: 0 0 4px 4px;
+    box-shadow: inset 0 -4px 6px rgba(120,90,40,0.15), inset -2px 0 4px rgba(0,0,0,0.08), 0 4px 5px rgba(0,0,0,0.4);
+    z-index: 1;
+  }
+  .key.black {
+    position: absolute; width: 18px; height: 108px;
+    background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 80%, #2a2a2a 100%);
+    border-radius: 0 0 3px 3px;
+    box-shadow: inset 0 -6px 8px rgba(120,120,120,0.25), inset 0 2px 2px rgba(255,255,255,0.1), 0 4px 6px rgba(0,0,0,0.6);
+    z-index: 10;
+  }
+  .key.pressed.white { transform: translateY(2px); background: linear-gradient(180deg,#ffe7a8 0%,#e8c878 100%); }
+  .key.pressed.black { transform: translateY(2px); background: linear-gradient(180deg,#5a4220 0%,#1a1208 100%); }
+  .glow {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 0%;
+    pointer-events: none; border-radius: inherit;
+    opacity: 0; transition: opacity 0.5s ease-out, height 0.5s ease-out;
+    mix-blend-mode: screen;
+  }
+  .key.white .glow { background: linear-gradient(0deg, rgba(255,180,60,0.85) 0%, rgba(255,200,100,0) 100%); }
+  .key.black .glow { background: linear-gradient(0deg, rgba(255,200,80,0.95) 0%, rgba(255,220,120,0) 100%); }
+
+  #overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 999; cursor: pointer; backdrop-filter: blur(4px);
+  }
+  #overlay div {
+    padding: 30px 50px; background: linear-gradient(180deg,#5a4d3a,#3a2f24);
+    border-radius: 12px; font-size: 18px; letter-spacing: 2px;
+  }
+</style>
+</head>
+<body>
+  <div id="overlay"><div>点击输入文本</div></div>
+  <div class="topbar">
+    <h1>♪ Falling Notes Piano</h1>
+    <button class="btn" id="chooseBtn">选择 MIDI</button>
+    <input type="file" id="midiFile" accept=".mid,.midi" style="display:none">
+    <button class="btn" id="playBtn" disabled>▶ 播放</button>
+    <button class="btn" id="stopBtn" disabled>■ 停止</button>
+    <span id="status">等待启动...</span>
+  </div>
+
+  <div class="stage">
+    <canvas id="fallCanvas"></canvas>
+    <div class="piano-wrap">
+      <div class="piano-top"></div>
+      <div class="felt"></div>
+      <div class="piano-scroll">
+        <div class="piano" id="piano"></div>
+      </div>
+    </div>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.js"></script>
+<script>
+const piano = document.getElementById('piano');
+const statusEl = document.getElementById('status');
+const playBtn = document.getElementById('playBtn');
+const stopBtn = document.getElementById('stopBtn');
+const chooseBtn = document.getElementById('chooseBtn');
+const fileInput = document.getElementById('midiFile');
+const overlay = document.getElementById('overlay');
+const canvas = document.getElementById('fallCanvas');
+const ctx = canvas.getContext('2d');
+
+const START = 21, END = 108;
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const keyEls = {};
+const keyInfo = {};   // midi -> {x, w, isBlack}
+function midiToName(m){ return NOTE_NAMES[m%12] + (Math.floor(m/12)-1); }
+function isBlackMidi(m){ return NOTE_NAMES[m%12].includes('#'); }
+
+// 创建键盘
+const WHITE_W = 30, BLACK_W = 18;
+let whiteIdx = 0;
+const blackQueue = [];
+for (let m = START; m <= END; m++) {
+  if (!isBlackMidi(m)) {
+    const el = document.createElement('div');
+    el.className = 'key white'; el.dataset.midi = m;
+    const glow = document.createElement('div'); glow.className = 'glow'; el.appendChild(glow);
+    piano.appendChild(el);
+    keyEls[m] = el;
+    whiteIdx++;
+  } else {
+    blackQueue.push({ midi: m, leftWhiteIdx: whiteIdx - 1 });
+  }
+}
+blackQueue.forEach(({midi, leftWhiteIdx})=>{
+  const el = document.createElement('div');
+  el.className = 'key black'; el.dataset.midi = midi;
+  const glow = document.createElement('div'); glow.className = 'glow'; el.appendChild(glow);
+  el.style.left = (4 + (leftWhiteIdx+1)*WHITE_W - BLACK_W/2) + 'px';
+  piano.appendChild(el);
+  keyEls[midi] = el;
+});
+
+// 计算键的画布坐标（用于下落特效）
+function recomputeKeyPositions() {
+  const stageRect = document.querySelector('.stage').getBoundingClientRect();
+  for (const m in keyEls) {
+    const r = keyEls[m].getBoundingClientRect();
+    keyInfo[m] = {
+      x: r.left - stageRect.left,
+      w: r.width,
+      isBlack: isBlackMidi(parseInt(m))
+    };
+  }
+}
+
+// === 音源 ===
+const reverb = new Tone.Reverb({ decay: 2.6, wet: 0.22 }).toDestination();
+function createSynthPiano() {
+  const synth = new Tone.PolySynth(Tone.Synth, {
+    oscillator: { type: "triangle" },
+    envelope: { attack: 0.005, decay: 1.4, sustain: 0.25, release: 1.2 }
+  });
+  synth.volume.value = -6;
+  synth.connect(reverb);
+  return synth;
+}
+const synthPiano = createSynthPiano();
+let instrument = synthPiano;
+
+function tryLoadSampler() {
+  statusEl.textContent = '后台加载真实钢琴采样...';
+  const sampler = new Tone.Sampler({
+    urls: {
+      A0:"A0.mp3", C1:"C1.mp3", "D#1":"Ds1.mp3", "F#1":"Fs1.mp3",
+      A1:"A1.mp3", C2:"C2.mp3", "D#2":"Ds2.mp3", "F#2":"Fs2.mp3",
+      A2:"A2.mp3", C3:"C3.mp3", "D#3":"Ds3.mp3", "F#3":"Fs3.mp3",
+      A3:"A3.mp3", C4:"C4.mp3", "D#4":"Ds4.mp3", "F#4":"Fs4.mp3",
+      A4:"A4.mp3", C5:"C5.mp3", "D#5":"Ds5.mp3", "F#5":"Fs5.mp3",
+      A5:"A5.mp3", C6:"C6.mp3", "D#6":"Ds6.mp3", "F#6":"Fs6.mp3",
+      A6:"A6.mp3", C7:"C7.mp3", "D#7":"Ds7.mp3", "F#7":"Fs7.mp3",
+      A7:"A7.mp3", C8:"C8.mp3"
+    },
+    release: 1.2,
+    baseUrl: "https://tonejs.github.io/audio/salamander/",
+    onload: () => {
+      instrument = sampler;
+      statusEl.textContent = '✅ 真实钢琴采样已加载';
+    }
+  });
+  sampler.connect(reverb);
+}
+
+overlay.addEventListener('click', async () => {
+  await Tone.start();
+  overlay.remove();
+  resize();
+  statusEl.textContent = '✓ 已启动（合成音色），可演奏 / 加载 MIDI';
+  tryLoadSampler();
+});
+
+// === 画布尺寸 ===
+function resize() {
+  const stage = document.querySelector('.stage');
+  canvas.width = stage.clientWidth * devicePixelRatio;
+  canvas.height = stage.clientHeight * devicePixelRatio;
+  canvas.style.width = stage.clientWidth + 'px';
+  canvas.style.height = stage.clientHeight + 'px';
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  recomputeKeyPositions();
+}
+window.addEventListener('resize', resize);
+
+// === 视觉按键效果 ===
+function pressVisual(midi, velocity){
+  const el = keyEls[midi]; if(!el) return;
+  el.classList.add('pressed');
+  const glow = el.querySelector('.glow');
+  glow.style.transition = 'opacity 0.04s, height 0.04s';
+  glow.style.opacity = (0.4 + velocity*0.6).toFixed(2);
+  glow.style.height = (20 + velocity*60) + '%';
+  // 在键盘顶部触发火花粒子
+  spawnSparks(midi, velocity);
+}
+function releaseVisual(midi){
+  const el = keyEls[midi]; if(!el) return;
+  el.classList.remove('pressed');
+  const glow = el.querySelector('.glow');
+  glow.style.transition = 'opacity 0.6s, height 0.6s';
+  glow.style.opacity = '0'; glow.style.height = '0%';
+}
+
+// 鼠标演奏
+Object.entries(keyEls).forEach(([m, el])=>{
+  const midi = parseInt(m);
+  const noteName = midiToName(midi);
+  el.addEventListener('mousedown', async ()=>{
+    await Tone.start();
+    instrument.triggerAttack(noteName, undefined, 0.8);
+    pressVisual(midi, 0.8);
+  });
+  const up = ()=>{
+    if (el.classList.contains('pressed')) {
+      instrument.triggerRelease(noteName);
+      releaseVisual(midi);
+    }
+  };
+  el.addEventListener('mouseup', up);
+  el.addEventListener('mouseleave', up);
+});
+
+// === 下落音符系统 ===
+// fallNotes: { midi, startTime, duration, velocity, triggered, ended }
+let fallNotes = [];
+let playStartTime = 0;     // performance.now() 基准
+let playOffset = 0.15;     // 播放偏移（秒）
+const LEAD_TIME = 3.0;     // 音符提前出现的秒数 (下落时长)
+let isPlaying = false;
+
+function noteColor(midi, alpha=1) {
+  // 按音高变化色相
+  const hue = ( (midi - 21) * 4 ) % 360;
+  return `hsla(${hue}, 85%, 60%, ${alpha})`;
+}
+
+// 粒子
+const sparks = [];
+function spawnSparks(midi, velocity) {
+  const info = keyInfo[midi]; if (!info) return;
+  const stageH = canvas.height / devicePixelRatio;
+  const pianoTop = stageH - document.querySelector('.piano-wrap').offsetHeight;
+  const cx = info.x + info.w/2;
+  const cy = pianoTop;
+  const n = Math.floor(8 + velocity*22);
+  for (let i=0; i<n; i++) {
+    const a = Math.random()*Math.PI - Math.PI; // 向上半圆
+    const sp = 1.5 + Math.random()*4 * (0.5+velocity);
+    sparks.push({
+      x: cx, y: cy,
+      vx: Math.cos(a)*sp,
+      vy: Math.sin(a)*sp - 1.5 - velocity*2,
+      life: 1, decay: 0.015 + Math.random()*0.02,
+      size: 1 + Math.random()*2 + velocity*1.5,
+      color: noteColor(midi, 1)
+    });
+  }
+}
+
+function drawFrame() {
+  const stageW = canvas.width / devicePixelRatio;
+  const stageH = canvas.height / devicePixelRatio;
+  const pianoH = document.querySelector('.piano-wrap').offsetHeight;
+  const fallBottom = stageH - pianoH;       // 下落终点(键盘顶部)
+
+  // 背景渐变（更深的暗色，淡淡拖影）
+  ctx.fillStyle = 'rgba(7,7,13,0.35)';
+  ctx.fillRect(0,0,stageW,stageH);
+
+  // 键盘上方一条发光线
+  const grad = ctx.createLinearGradient(0, fallBottom-30, 0, fallBottom);
+  grad.addColorStop(0,'rgba(255,200,90,0)');
+  grad.addColorStop(1,'rgba(255,200,90,0.25)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, fallBottom-30, stageW, 30);
+  ctx.strokeStyle = 'rgba(255,210,140,0.8)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, fallBottom); ctx.lineTo(stageW, fallBottom); ctx.stroke();
+
+  // 当前播放时间(秒)
+  const t = isPlaying ? (performance.now() - playStartTime)/1000 - playOffset : 0;
+
+  // 绘制下落音符
+  for (const note of fallNotes) {
+    const startY_time = note.startTime - t;          // 距离开始还有多久
+    const endY_time = note.startTime + note.duration - t;
+    if (startY_time > LEAD_TIME) continue;           // 还没出现
+    if (endY_time < -0.05) continue;                 // 已经过去
+
+    const info = keyInfo[note.midi]; if (!info) continue;
+
+    // y: 时间映射到屏幕 (顶部 0 表示 LEAD_TIME 后到达底部)
+    // 顶端 y = fallBottom * (1 - startY_time/LEAD_TIME)
+    const topY    = fallBottom * (1 - startY_time/LEAD_TIME);
+    const bottomY = fallBottom * (1 - endY_time/LEAD_TIME);
+    let y = Math.min(topY, bottomY);
+    let h = Math.abs(bottomY - topY);
+    // 钳制（音符越过键盘部分不绘制）
+    if (y + h > fallBottom) h = fallBottom - y;
+    if (h < 2) h = 2;
+
+    const x = info.x + 1;
+    const w = info.w - 2;
+    const alpha = 0.55 + 0.45*note.velocity;
+
+    // 阴影发光
+    ctx.shadowBlur = 12 + note.velocity*18;
+    ctx.shadowColor = noteColor(note.midi, 0.9);
+    // 主体（圆角矩形）
+    ctx.fillStyle = noteColor(note.midi, alpha);
+    roundRect(ctx, x, y, w, h, Math.min(5, w/2));
+    ctx.fill();
+
+    // 顶部高光
+    ctx.shadowBlur = 0;
+    const hi = ctx.createLinearGradient(0, y, 0, y+Math.min(h, 20));
+    hi.addColorStop(0,'rgba(255,255,255,0.55)');
+    hi.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle = hi;
+    roundRect(ctx, x, y, w, Math.min(h, 20), Math.min(5, w/2));
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+
+  // 绘制粒子
+  for (let i=sparks.length-1; i>=0; i--) {
+    const s = sparks[i];
+    s.x += s.vx; s.y += s.vy;
+    s.vy += 0.12;            // 重力
+    s.vx *= 0.99;
+    s.life -= s.decay;
+    if (s.life <= 0) { sparks.splice(i,1); continue; }
+    ctx.globalAlpha = Math.max(0, s.life);
+    ctx.fillStyle = s.color;
+    ctx.shadowBlur = 8; ctx.shadowColor = s.color;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.size, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.shadowBlur = 0;
+
+  requestAnimationFrame(drawFrame);
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+requestAnimationFrame(drawFrame);
+
+// === MIDI ===
+let currentMidi = null;
+chooseBtn.addEventListener('click', ()=>fileInput.click());
+fileInput.addEventListener('change', async (e)=>{
+  const file = e.target.files[0]; if(!file) return;
+  await Tone.start();
+  const buf = await file.arrayBuffer();
+  try {
+    currentMidi = new Midi(buf);
+    statusEl.textContent = `已加载: ${file.name} · ${currentMidi.duration.toFixed(1)}s`;
+    playBtn.disabled = false;
+  } catch(err){
+    statusEl.textContent = '❌ MIDI 解析失败：' + err.message;
+  }
+});
+
+function stopAll(){
+  Tone.Transport.stop();
+  Tone.Transport.cancel();
+  if (instrument.releaseAll) instrument.releaseAll();
+  Object.keys(keyEls).forEach(m=>releaseVisual(parseInt(m)));
+  fallNotes = [];
+  isPlaying = false;
+  playBtn.disabled = !currentMidi;
+  stopBtn.disabled = true;
+}
+
+playBtn.addEventListener('click', async ()=>{
+  if(!currentMidi) return;
+  await Tone.start();
+  stopAll();
+  recomputeKeyPositions();
+
+  fallNotes = [];
+  currentMidi.tracks.forEach(track=>{
+    track.notes.forEach(note=>{
+      fallNotes.push({
+        midi: note.midi,
+        startTime: note.time,
+        duration: Math.max(note.duration, 0.05),
+        velocity: note.velocity
+      });
+      Tone.Transport.schedule((time)=>{
+        instrument.triggerAttackRelease(note.name, note.duration, time, note.velocity);
+        Tone.Draw.schedule(()=>pressVisual(note.midi, note.velocity), time);
+        Tone.Draw.schedule(()=>releaseVisual(note.midi), time + Math.max(note.duration, 0.05));
+      }, note.time + playOffset);
+    });
+  });
+  Tone.Transport.schedule(()=>{ stopAll(); statusEl.textContent='播放完毕'; },
+    currentMidi.duration + playOffset + 0.5);
+
+  // 让下落动画与 transport 对齐：音符在 startTime 秒时落到键盘顶
+  // 我们想让用户在播放前就看到第一个音符已下落 LEAD_TIME，所以提前 LEAD_TIME 启动视觉
+  Tone.Transport.position = 0;
+  Tone.Transport.start("+" + LEAD_TIME);
+  playStartTime = performance.now() + LEAD_TIME*1000;
+  isPlaying = true;
+
+  playBtn.disabled = true; stopBtn.disabled = false;
+  statusEl.textContent = '▶ 正在播放...';
+});
+stopBtn.addEventListener('click', ()=>{ stopAll(); statusEl.textContent = '已停止'; });
+</script>
+</body>
+</html>
